@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Botnet Node Tracker</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        #map { height: 100vh; }
+        #control-panel {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(255,255,255,0.9);
+            padding: 10px;
+            z-index: 1000;
+            border-radius: 5px;
+            box-shadow: 0 0 15px rgba(0,0,0,0.2);
+        }
+        .online { color: green; }
+    </style>
+</head>
+<body>
+    <div id="control-panel">
+        <h3>🛸 Active Nodes: <span id="node-count" class="online">0</span></h3>
+        <div><strong>Last Beacon:</strong> <span id="last-beacon">Never</span></div>
+        <button onclick="updateMap()">Refresh View</button>
+    </div>
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // Initialize map
+        const map = L.map('map').setView([20, 0], 2);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+        const nodeMarkers = L.layerGroup().addTo(map);
+
+        // IndexedDB for node storage (client-side database)
+        const dbName = "BotnetNodesDB";
+        let db;
+
+        function initDB() {
+            return new Promise((resolve) => {
+                const request = indexedDB.open(dbName, 1);
+                
+                request.onupgradeneeded = (event) => {
+                    db = event.target.result;
+                    if (!db.objectStoreNames.contains('nodes')) {
+                        db.createObjectStore('nodes', { keyPath: 'id' });
+                    }
+                };
+
+                request.onsuccess = (event) => {
+                    db = event.target.result;
+                    resolve(db);
+                };
+            });
+        }
+
+        // Store a new node report
+        async function storeNodeData(node) {
+            if (!db) await initDB();
+            return new Promise((resolve) => {
+                const tx = db.transaction('nodes', 'readwrite');
+                tx.objectStore('nodes').put(node);
+                tx.oncomplete = () => resolve();
+            });
+        }
+
+        // Get all nodes from DB
+        async function getAllNodes() {
+            if (!db) await initDB();
+            return new Promise((resolve) => {
+                const tx = db.transaction('nodes', 'readonly');
+                const request = tx.objectStore('nodes').getAll();
+                request.onsuccess = () => resolve(request.result || []);
+            });
+        }
+
+        // Your worm nodes should call this when phoning home
+        window.reportNode = async function(nodeData) {
+            // Get approximate location from IP
+            if (!nodeData.lat || !nodeData.lng) {
+                const loc = await fetch(`https://ipapi.co/${nodeData.ip}/json/`)
+                    .then(res => res.json());
+                nodeData.lat = loc.latitude;
+                nodeData.lng = loc.longitude;
+                nodeData.country = loc.country_name;
+            }
+            
+            nodeData.lastSeen = Date.now();
+            await storeNodeData(nodeData);
+            updateMap();
+        };
+
+        // Update map with current nodes
+        async function updateMap() {
+            const nodes = await getAllNodes();
+            document.getElementById('node-count').textContent = nodes.length;
+            document.getElementById('last-beacon').textContent = new Date().toLocaleString();
+            
+            nodeMarkers.clearLayers();
+            
+            nodes.forEach(node => {
+                const isOnline = (Date.now() - node.lastSeen) < 3600000; // 1 hour threshold
+                const marker = L.circleMarker([node.lat, node.lng], {
+                    radius: 6,
+                    color: isOnline ? '#00ff00' : '#ff0000',
+                    fillOpacity: 0.8
+                }).bindPopup(`
+                    <b>Node ID:</b> ${node.id}<br>
+                    <b>IP:</b> ${node.ip}<br>
+                    <b>Location:</b> ${node.country || 'Unknown'}<br>
+                    <b>Status:</b> <span class="${isOnline ? 'online' : 'offline'}">
+                        ${isOnline ? 'Online' : 'Offline'}
+                    </span>
+                `);
+                nodeMarkers.addLayer(marker);
+            });
+        }
+
+        // Initialize
+        (async () => {
+            await initDB();
+            updateMap();
+            setInterval(updateMap, 300000); // Auto-update every 5 minutes
+        })();
+    </script>
+</body>
+</html>
